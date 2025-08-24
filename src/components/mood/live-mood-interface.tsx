@@ -58,6 +58,8 @@ export default function LiveMoodInterface() {
   const [qrCode, setQrCode] = useState<string>("");
   const [playlistGenerated, setPlaylistGenerated] = useState(false);
   const [playlistFixed, setPlaylistFixed] = useState(false);
+  const [isCreatingPlaylist, setIsCreatingPlaylist] = useState(false);
+  const [playlistAttempt, setPlaylistAttempt] = useState(0);
 
 
   // Capture photo and detect mood with instant playlist creation
@@ -154,9 +156,83 @@ export default function LiveMoodInterface() {
     return () => stopCamera();
   }, [startCamera, stopCamera]);
 
-  const handleGetPlaylist = () => {
+  const handleGetPlaylist = async () => {
     if (moodResult) {
+      // Stop mood detection immediately when get playlist is clicked
+      console.log('⏸️ Pausing mood detection for playlist creation...');
+      detectionEnabledRef.current = false;
+      
       setPlaylistGenerated(true);
+      setIsCreatingPlaylist(true);
+      
+      // Try to create/get playlist with retries
+      console.log('⏳ Creating playlist...');
+      
+      let attempts = 0;
+      const maxAttempts = 5;
+      const retryDelay = 2000; // 2 seconds
+      
+      while (attempts < maxAttempts) {
+        attempts++;
+        setPlaylistAttempt(attempts);
+        console.log(`🔄 Attempt ${attempts}/${maxAttempts} to create playlist for mood: ${moodResult.mood}...`);
+        
+        try {
+          // Use the current mood result instead of capturing a new image
+          // This ensures the playlist matches the displayed mood
+          const response = await fetch("/api/playlist/" + encodeURIComponent(moodResult.mood), {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+            },
+          });
+
+          if (response.ok) {
+            const result = await response.json();
+            if (result.playlist_url) {
+              console.log(`✅ Playlist created/retrieved for mood '${moodResult.mood}':`, result.playlist_url);
+              
+              // Update mood result with playlist info
+              const updatedMoodResult = {
+                ...moodResult,
+                playlist_url: result.playlist_url,
+                recommendations: result.tracks || moodResult.recommendations
+              };
+              setMoodResult(updatedMoodResult);
+              
+              // Generate QR code for the playlist
+              const qr = await QRCode.toDataURL(result.playlist_url);
+              setQrCode(qr);
+              setPlaylistFixed(true);
+              
+              // Show results after playlist is ready
+              setShowResults(true);
+              setIsCreatingPlaylist(false);
+              setPlaylistAttempt(0);
+              return;
+            } else {
+              console.log(`⚠️ No playlist URL in response for mood '${moodResult.mood}' (attempt ${attempts})`);
+            }
+          } else {
+            console.error(`❌ Failed to create playlist for mood '${moodResult.mood}' (attempt ${attempts}):`, response.status);
+          }
+        } catch (error) {
+          console.error(`Error creating playlist for mood '${moodResult.mood}' (attempt ${attempts}):`, error);
+        }
+        
+        // Wait before retrying (except on last attempt)
+        if (attempts < maxAttempts) {
+          console.log(`⏳ Waiting ${retryDelay}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+        }
+      }
+      
+      // If we get here, all attempts failed
+      console.log('❌ All playlist creation attempts failed');
+      setIsCreatingPlaylist(false);
+      setPlaylistAttempt(0);
+      
+      // Still show results even if playlist creation failed
       setShowResults(true);
     }
   };
@@ -305,7 +381,7 @@ export default function LiveMoodInterface() {
                       stop
                     </Button>
                     
-                    {moodResult && !playlistGenerated && (
+                    {moodResult && !playlistGenerated && !isCreatingPlaylist && (
                       <Button
                         onClick={handleGetPlaylist}
                         size="sm"
@@ -318,7 +394,16 @@ export default function LiveMoodInterface() {
                     
 
                     
-                    {playlistGenerated && (
+                    {isCreatingPlaylist && (
+                      <div className="flex items-center gap-1 px-2 py-1 bg-blue-500/20 border border-blue-500/30 rounded">
+                        <RefreshCw className="h-3 w-3 text-blue-400 animate-spin" />
+                        <span className="text-blue-400 text-xs">
+                          creating playlist... (attempt {playlistAttempt}/5)
+                        </span>
+                      </div>
+                    )}
+                    
+                    {playlistGenerated && !isCreatingPlaylist && (
                       <div className="flex items-center gap-1 px-2 py-1 bg-white/10 border border-white/20 rounded">
                         <span className="text-white text-xs">ready</span>
                       </div>
@@ -342,11 +427,17 @@ export default function LiveMoodInterface() {
               setCurrentMood(null);
               setConfidence(0);
               
-              // Enable detection
+              // Enable detection again
               detectionEnabledRef.current = true;
               
-              // Restart detection if camera is active and no interval running
-              if (videoState.isActive && !intervalRef.current) {
+              // Clear any existing interval first
+              if (intervalRef.current) {
+                clearInterval(intervalRef.current);
+                intervalRef.current = null;
+              }
+              
+              // Restart mood detection if camera is active
+              if (videoState.isActive) {
                 console.log('🔄 Starting detection interval...');
                 intervalRef.current = setInterval(() => {
                   captureAndDetectMood();
@@ -354,10 +445,6 @@ export default function LiveMoodInterface() {
                 // Also trigger immediate detection
                 setTimeout(() => captureAndDetectMood(), 500);
               }
-            } else {
-              // Dialog opened - disable detection
-              console.log('⏸️ Dialog opened, pausing detection...');
-              detectionEnabledRef.current = false;
             }
           }}>
             <DialogContent className="max-w-[90vw] w-[90vw] max-h-[90vh] overflow-hidden">
@@ -381,7 +468,7 @@ export default function LiveMoodInterface() {
                     </div>
 
                     {/* Big QR Code - Main Focus */}
-                    {qrCode && (
+                    {qrCode ? (
                       <div className="flex flex-col items-center space-y-4">
                         <div className="p-6 bg-white rounded-xl shadow-xl">
                           <img src={qrCode} alt="playlist qr code" className="w-64 h-64" />
@@ -389,6 +476,18 @@ export default function LiveMoodInterface() {
                         <p className="text-lg text-muted-foreground text-center font-medium">
                           scan to open your playlist
                         </p>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center space-y-4">
+                        <div className="p-6 bg-gray-800 rounded-xl border border-gray-600">
+                          <div className="w-64 h-64 flex items-center justify-center">
+                            <div className="text-center">
+                              <Music className="h-16 w-16 text-gray-400 mx-auto mb-4" />
+                              <p className="text-gray-400 text-lg">playlist not available</p>
+                              <p className="text-gray-500 text-sm mt-2">try again later</p>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>

@@ -615,12 +615,14 @@ async def detect_mood_and_get_playlist(request: MoodDetectionRequest, limit: int
                 logger.info(f"✅ Real playlist created and will be shown in QR code: {playlist_url}")
             else:
                 logger.info("⚠️ No playlist created - QR code will not be shown")
+        else:
+            logger.warning(f"⚠️ No tracks found for mood '{mood}'")
         
         return MoodDetectionResponse(
             mood=mood,
             confidence=confidence,
             playlist_url=playlist_url,
-            recommendations=tracks
+            recommendations=tracks or []
         )
         
     except HTTPException:
