@@ -43,6 +43,7 @@ interface VideoState {
 export default function LiveMoodInterface() {
   const webcamRef = useRef<Webcam>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const detectionEnabledRef = useRef<boolean>(true);
 
   const [videoState, setVideoState] = useState<VideoState>({
     isActive: false,
@@ -59,31 +60,9 @@ export default function LiveMoodInterface() {
   const [playlistFixed, setPlaylistFixed] = useState(false);
 
 
-  // Start camera
-  const startCamera = useCallback(() => {
-    setVideoState(prev => ({ ...prev, isActive: true, error: null }));
-    
-    // Start mood detection every 3 seconds
-    intervalRef.current = setInterval(() => {
-      captureAndDetectMood();
-    }, 3000);
-  }, []);
-
-  // Stop camera
-  const stopCamera = useCallback(() => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-
-    setVideoState(prev => ({ ...prev, isActive: false }));
-    setCurrentMood(null);
-    setConfidence(0);
-  }, []);
-
   // Capture photo and detect mood with instant playlist creation
   const captureAndDetectMood = useCallback(async () => {
-    if (!webcamRef.current || videoState.isProcessing || playlistFixed) return;
+    if (!webcamRef.current || videoState.isProcessing || !detectionEnabledRef.current) return;
 
     try {
       setVideoState(prev => ({ ...prev, isProcessing: true }));
@@ -121,18 +100,12 @@ export default function LiveMoodInterface() {
       setMoodResult(result);
 
       // Generate QR code instantly if we have a real playlist URL
-      if (!playlistFixed && result.playlist_url && result.playlist_url.includes('open.spotify.com/playlist/')) {
+      if (result.playlist_url && result.playlist_url.includes('open.spotify.com/playlist/')) {
         const qr = await QRCode.toDataURL(result.playlist_url);
         setQrCode(qr);
         setPlaylistFixed(true);
         console.log('✅ Real playlist QR code generated instantly:', result.playlist_url);
-        
-        // Stop mood detection since we have a real playlist
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
-        }
-      } else if (!playlistFixed) {
+      } else {
         setQrCode('');
         console.log('⚠️ No real playlist created - continuing detection');
       }
@@ -148,7 +121,32 @@ export default function LiveMoodInterface() {
     } finally {
       setVideoState(prev => ({ ...prev, isProcessing: false }));
     }
-  }, [videoState.isProcessing, playlistFixed]);
+  }, [videoState.isProcessing]);
+
+
+
+  // Start camera
+  const startCamera = useCallback(() => {
+    setVideoState(prev => ({ ...prev, isActive: true, error: null }));
+    detectionEnabledRef.current = true;
+    
+    // Start mood detection every 3 seconds
+    intervalRef.current = setInterval(() => {
+      captureAndDetectMood();
+    }, 3000);
+  }, []);
+
+  // Stop camera
+  const stopCamera = useCallback(() => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+
+    setVideoState(prev => ({ ...prev, isActive: false }));
+    setCurrentMood(null);
+    setConfidence(0);
+  }, []);
 
   // Auto-start camera on mount
   useEffect(() => {
@@ -159,11 +157,6 @@ export default function LiveMoodInterface() {
   const handleGetPlaylist = () => {
     if (moodResult) {
       setPlaylistGenerated(true);
-      // Stop the detection interval
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
       setShowResults(true);
     }
   };
@@ -349,23 +342,22 @@ export default function LiveMoodInterface() {
               setCurrentMood(null);
               setConfidence(0);
               
-              // Clear any existing interval first
-              if (intervalRef.current) {
-                clearInterval(intervalRef.current);
-                intervalRef.current = null;
-              }
+              // Enable detection
+              detectionEnabledRef.current = true;
               
-              // Restart mood detection if camera is active with a delay to ensure state updates
-              if (videoState.isActive) {
-                setTimeout(() => {
-                  console.log('🔄 Starting detection interval...');
-                  intervalRef.current = setInterval(() => {
-                    captureAndDetectMood();
-                  }, 3000);
-                  // Also trigger immediate detection
+              // Restart detection if camera is active and no interval running
+              if (videoState.isActive && !intervalRef.current) {
+                console.log('🔄 Starting detection interval...');
+                intervalRef.current = setInterval(() => {
                   captureAndDetectMood();
-                }, 100);
+                }, 3000);
+                // Also trigger immediate detection
+                setTimeout(() => captureAndDetectMood(), 500);
               }
+            } else {
+              // Dialog opened - disable detection
+              console.log('⏸️ Dialog opened, pausing detection...');
+              detectionEnabledRef.current = false;
             }
           }}>
             <DialogContent className="max-w-[90vw] w-[90vw] max-h-[90vh] overflow-hidden">

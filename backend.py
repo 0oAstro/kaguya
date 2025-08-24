@@ -56,6 +56,9 @@ face_cascade = None
 spotify_client = None
 spotify_oauth = None
 
+# Store created playlist URLs to avoid duplicates
+created_playlists = {}  # {mood: playlist_url}
+
 # Mood mapping
 MOOD_LABELS = {
     0: "Angry",
@@ -304,17 +307,25 @@ def search_spotify_by_mood(mood: str, limit: int = 20) -> List[Dict[str, Any]]:
         search_query = get_mood_search_query(mood)
         market = os.getenv("SPOTIFY_MARKET", "US")
         
-        # Search for tracks
+        # Search for tracks with higher limit to account for duplicates
+        search_limit = min(limit * 2, 50)  # Search more tracks to filter duplicates
+        
         results = spotify_client.search(
             q=search_query, 
             type='track', 
-            limit=limit,
+            limit=search_limit,
             market=market
         )
         
         tracks = []
+        seen_track_ids = set()  # Track unique track IDs
+        
         for track in results['tracks']['items']:
             if not track:
+                continue
+            
+            # Skip if we've already seen this track ID
+            if track['id'] in seen_track_ids:
                 continue
                 
             # Get artist name
@@ -340,8 +351,15 @@ def search_spotify_by_mood(mood: str, limit: int = 20) -> List[Dict[str, Any]]:
                 'duration_ms': track['duration_ms'],
                 'popularity': track['popularity']
             }
+            
             tracks.append(track_info)
+            seen_track_ids.add(track['id'])
+            
+            # Stop if we have enough unique tracks
+            if len(tracks) >= limit:
+                break
         
+        logger.info(f"Found {len(tracks)} unique tracks for mood '{mood}' (filtered from {len(results['tracks']['items'])} total)")
         return tracks
         
     except Exception as e:
@@ -398,6 +416,11 @@ def create_actual_spotify_playlist(tracks: List[Dict[str, Any]], mood: str) -> s
         if not tracks:
             return None
             
+        # Check if we already created a playlist for this mood
+        if mood in created_playlists:
+            logger.info(f"✅ Reusing existing playlist for mood '{mood}': {created_playlists[mood]}")
+            return created_playlists[mood]
+            
         # Get authenticated Spotify client
         sp = get_authenticated_spotify_client()
         if not sp:
@@ -419,18 +442,27 @@ def create_actual_spotify_playlist(tracks: List[Dict[str, Any]], mood: str) -> s
             description=playlist_description
         )
         
-        # Get track URIs
+        # Get track URIs (ensure no duplicates)
         track_uris = []
+        seen_uris = set()
         for track in tracks[:50]:  # Spotify allows max 100 tracks per request, we'll use 50
             if track.get('id'):
-                track_uris.append(f"spotify:track:{track['id']}")
+                track_uri = f"spotify:track:{track['id']}"
+                if track_uri not in seen_uris:
+                    track_uris.append(track_uri)
+                    seen_uris.add(track_uri)
         
         # Add tracks to playlist
         if track_uris:
             sp.playlist_add_items(playlist['id'], track_uris)
         
+        playlist_url = playlist['external_urls']['spotify']
+        
+        # Store the playlist URL to avoid duplicates
+        created_playlists[mood] = playlist_url
+        
         logger.info(f"✅ Created public Spotify playlist: {playlist['name']} with {len(track_uris)} tracks")
-        return playlist['external_urls']['spotify']
+        return playlist_url
         
     except Exception as e:
         logger.error(f"Error creating Spotify playlist: {e}")
@@ -474,7 +506,8 @@ async def root():
             "spotify_setup": "/spotify-setup",
             "spotify_auth_url": "/spotify-auth-url", 
             "spotify_callback": "/callback",
-            "spotify_token": "/spotify-token"
+            "spotify_token": "/spotify-token",
+            "cleanup": "/cleanup"
         }
     }
 
@@ -754,6 +787,79 @@ async def set_spotify_token(code: str):
         raise
     except Exception as e:
         logger.error(f"Error setting Spotify token: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/cleanup")
+async def cleanup_kaguya_playlists():
+    """Delete all kaguya playlists from Spotify account"""
+    try:
+        # Get authenticated Spotify client
+        sp = get_authenticated_spotify_client()
+        if not sp:
+            raise HTTPException(status_code=503, detail="No authenticated Spotify client available")
+        
+        # Get user info
+        user_info = sp.current_user()
+        user_id = user_info['id']
+        
+        # Get all user playlists
+        playlists = []
+        offset = 0
+        limit = 50
+        
+        while True:
+            user_playlists = sp.current_user_playlists(limit=limit, offset=offset)
+            playlists.extend(user_playlists['items'])
+            
+            if len(user_playlists['items']) < limit:
+                break
+            offset += limit
+        
+        # Filter kaguya playlists
+        kaguya_playlists = []
+        for playlist in playlists:
+            if playlist['name'].lower().startswith('kaguya'):
+                kaguya_playlists.append(playlist)
+        
+        if not kaguya_playlists:
+            return {
+                "status": "success",
+                "message": "No kaguya playlists found to delete",
+                "deleted_count": 0,
+                "deleted_playlists": []
+            }
+        
+        # Delete each kaguya playlist
+        deleted_playlists = []
+        for playlist in kaguya_playlists:
+            try:
+                sp.user_playlist_unfollow(user_id, playlist['id'])
+                deleted_playlists.append({
+                    "name": playlist['name'],
+                    "id": playlist['id'],
+                    "url": playlist['external_urls']['spotify']
+                })
+                logger.info(f"🗑️ Deleted playlist: {playlist['name']}")
+            except Exception as e:
+                logger.error(f"Failed to delete playlist {playlist['name']}: {e}")
+        
+        # Clear the stored playlist URLs
+        global created_playlists
+        created_playlists.clear()
+        
+        logger.info(f"🧹 Cleanup complete: deleted {len(deleted_playlists)} kaguya playlists")
+        
+        return {
+            "status": "success",
+            "message": f"Successfully deleted {len(deleted_playlists)} kaguya playlists",
+            "deleted_count": len(deleted_playlists),
+            "deleted_playlists": deleted_playlists
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during cleanup: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # ==============================
