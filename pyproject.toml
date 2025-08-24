@@ -1,0 +1,26 @@
+[project]
+name = "kaguya"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.116.1",
+    "numpy>=2.2.6",
+    "opencv-python>=4.12.0.88",
+    "pandas>=2.3.2",
+    "pillow>=11.3.0",
+    "python-dotenv>=1.1.1",
+    "python-multipart>=0.0.20",
+    "scikit-learn>=1.7.1",
+    "spotipy>=2.25.1",
+    "tensorflow>=2.20.0",
+    "uvicorn>=0.35.0",
+    "websockets>=15.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.4.1",
+]
